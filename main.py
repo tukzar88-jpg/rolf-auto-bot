@@ -1,6 +1,6 @@
+```python
 import os
 import logging
-import shutil
 
 from telegram import Update
 from telegram.ext import (
@@ -12,10 +12,19 @@ from telegram.ext import (
 from playwright.async_api import async_playwright
 
 
+# =========================
+# НАСТРОЙКА ЛОГОВ
+# =========================
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+
+
+# =========================
+# НАСТРОЙКИ
+# =========================
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -26,40 +35,40 @@ AVITO_URL = (
 )
 
 
+# =========================
+# ПРОВЕРКА AVITO
+# =========================
+
 async def check_avito():
+
     browser = None
 
     try:
-        # Ищем установленный в Railway Chromium
-        chromium_path = shutil.which("chromium")
-
-        if not chromium_path:
-            chromium_path = shutil.which("chromium-browser")
-
-        if not chromium_path:
-            chromium_path = shutil.which("google-chrome")
-
-        if not chromium_path:
-            raise RuntimeError(
-                "Chromium не найден в системе Railway. "
-                "Проверьте nixpacks.toml."
-            )
 
         logging.info(
-            f"Найден Chromium: {chromium_path}"
+            "Запускаем Playwright..."
         )
 
         async with async_playwright() as p:
 
+            # Используем Chromium,
+            # установленный Playwright
+            logging.info(
+                "Запускаем Chromium через Playwright..."
+            )
+
             browser = await p.chromium.launch(
                 headless=True,
-                executable_path=chromium_path,
                 args=[
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--disable-blink-features=AutomationControlled",
                 ],
+            )
+
+            logging.info(
+                "Chromium успешно запущен!"
             )
 
             context = await browser.new_context(
@@ -80,7 +89,7 @@ async def check_avito():
             page = await context.new_page()
 
             logging.info(
-                "Открываю страницу Avito..."
+                "Открываем страницу Avito..."
             )
 
             response = await page.goto(
@@ -99,7 +108,7 @@ async def check_avito():
                 f"Avito HTTP status: {status}"
             )
 
-            # Даём странице время загрузить JavaScript
+            # Даём странице загрузить JavaScript
             await page.wait_for_timeout(7000)
 
             title = await page.title()
@@ -107,10 +116,15 @@ async def check_avito():
             html = await page.content()
 
             try:
+
                 text = await page.locator(
                     "body"
-                ).inner_text(timeout=5000)
+                ).inner_text(
+                    timeout=5000
+                )
+
             except Exception:
+
                 text = ""
 
             logging.info(
@@ -124,9 +138,10 @@ async def check_avito():
             lower_text = text.lower()
             lower_html = html.lower()
 
-            # -----------------------------
+
+            # =========================
             # ПРОВЕРКА CAPTCHA
-            # -----------------------------
+            # =========================
 
             captcha_words = [
                 "captcha",
@@ -152,14 +167,17 @@ async def check_avito():
                     "🛡 <b>Avito показал CAPTCHA</b>\n\n"
                     f"HTTP: {status}\n"
                     f"Заголовок: {title}\n"
-                    f"Размер страницы: {len(html)} символов\n\n"
+                    f"Размер страницы: "
+                    f"{len(html)} символов\n\n"
                     "❌ Браузер запустился, "
-                    "но Avito заблокировал автоматический запрос."
+                    "но Avito заблокировал "
+                    "автоматический запрос."
                 )
 
-            # -----------------------------
+
+            # =========================
             # ПОИСК ССЫЛОК НА АВТО
-            # -----------------------------
+            # =========================
 
             car_links = await page.locator(
                 'a[href*="/avtomobili/"]'
@@ -168,7 +186,9 @@ async def check_avito():
             unique_links = set()
 
             for link in car_links:
+
                 try:
+
                     href = await link.get_attribute(
                         "href"
                     )
@@ -177,18 +197,26 @@ async def check_avito():
                         unique_links.add(href)
 
                 except Exception:
+
                     continue
 
-            # -----------------------------
+
+            # =========================
             # ПРОВЕРКА ПРИЗНАКОВ АВТО
-            # -----------------------------
+            # =========================
 
             markers = {
                 "₽": "₽" in text,
                 "руб": "руб" in lower_text,
-                "автомобили": "автомобил" in lower_text,
-                "пробег": "пробег" in lower_text,
-                "год": "год" in lower_text,
+                "автомобили": (
+                    "автомобил" in lower_text
+                ),
+                "пробег": (
+                    "пробег" in lower_text
+                ),
+                "год": (
+                    "год" in lower_text
+                ),
             }
 
             found_markers = [
@@ -197,9 +225,10 @@ async def check_avito():
                 if exists
             ]
 
-            # -----------------------------
+
+            # =========================
             # ЕСЛИ НАШЛИ АВТО
-            # -----------------------------
+            # =========================
 
             if unique_links:
 
@@ -221,17 +250,19 @@ async def check_avito():
                     f"Найдено ссылок: "
                     f"{len(unique_links)}\n\n"
                     "🔎 Признаки объявлений:\n"
-                    f"{', '.join(found_markers) if found_markers else 'нет'}\n\n"
+                    f"{', '.join(found_markers) "
+                    f"if found_markers else 'нет'}\n\n"
                     "Первые ссылки:\n"
                     f"<code>{links_text[:2500]}</code>\n\n"
                     "🔥 Можно переходить "
                     "к разработке парсера."
                 )
 
-            # -----------------------------
-            # СТРАНИЦА ОТКРЫЛАСЬ,
+
+            # =========================
+            # AVITO ОТКРЫЛСЯ,
             # НО АВТО НЕ НАЙДЕНЫ
-            # -----------------------------
+            # =========================
 
             preview = " ".join(
                 text[:1500].split()
@@ -245,175 +276,5 @@ async def check_avito():
                 "но объявления не найдены</b>\n\n"
                 f"HTTP: {status}\n"
                 f"Заголовок: {title}\n"
-                f"Размер HTML: {len(html)}\n"
-                f"Ссылок на авто: "
-                f"{len(unique_links)}\n\n"
-                "Признаки:\n"
-                f"{', '.join(found_markers) if found_markers else 'нет'}\n\n"
-                "Фрагмент страницы:\n"
-                f"<code>{preview[:2000]}</code>"
-            )
-
-    except Exception as e:
-
-        logging.exception(
-            "Ошибка Playwright"
-        )
-
-        if browser:
-            try:
-                await browser.close()
-            except Exception:
-                pass
-
-        return (
-            "❌ <b>Ошибка Playwright</b>\n\n"
-            f"<code>{str(e)[:2500]}</code>"
-        )
-
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    await update.message.reply_text(
-        "🚗 <b>ROLF AUTO FINDER</b>\n\n"
-        "Бесплатный тестовый режим.\n\n"
-        "/monitor — проверить Avito\n"
-        "/filters — показать фильтры\n"
-        "/stop — остановить\n"
-        "/stats — статистика",
-        parse_mode="HTML",
-    )
-
-
-async def monitor(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    await update.message.reply_text(
-        "🔍 Открываю Avito через браузер...\n\n"
-        "Подожди несколько секунд."
-    )
-
-    result = await check_avito()
-
-    await update.message.reply_text(
-        result,
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
-
-
-async def filters(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    await update.message.reply_text(
-        "🔎 <b>Текущие фильтры:</b>\n\n"
-        "💰 Цена: от 1 500 000 ₽\n"
-        "🚗 Пробег: до 150 000 км\n"
-        "📅 Год: без ограничений\n"
-        "📍 Россия\n"
-        "📌 Источник: Avito",
-        parse_mode="HTML",
-    )
-
-
-async def stop(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    await update.message.reply_text(
-        "⏹ Мониторинг остановлен."
-    )
-
-
-async def stats(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    await update.message.reply_text(
-        "📊 Статистика пока недоступна.\n\n"
-        "Сейчас бот находится "
-        "в диагностическом режиме."
-    )
-
-
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    logging.error(
-        "Ошибка обработки обновления: %s",
-        context.error,
-    )
-
-
-def main():
-
-    if not TOKEN:
-        raise RuntimeError(
-            "BOT_TOKEN не найден!"
-        )
-
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .build()
-    )
-
-    app.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
-    )
-
-    app.add_handler(
-        CommandHandler(
-            "monitor",
-            monitor,
-        )
-    )
-
-    app.add_handler(
-        CommandHandler(
-            "filters",
-            filters,
-        )
-    )
-
-    app.add_handler(
-        CommandHandler(
-            "stop",
-            stop,
-        )
-    )
-
-    app.add_handler(
-        CommandHandler(
-            "stats",
-            stats,
-        )
-    )
-
-    app.add_error_handler(
-        error_handler
-    )
-
-    print(
-        "ROLF AUTO FINDER запущен"
-    )
-
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+                f"Размер HTML: {
+```
