@@ -1,15 +1,11 @@
 import os
 import logging
 import random
-import time
 import re
-import statistics          # <-- НОВЫЙ ИМПОРТ
-from datetime import datetime
+import statistics
+import feedparser
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-import requests
-from bs4 import BeautifulSoup
-from fake_useragent import UserAgent
 
 # Настройка логов
 logging.basicConfig(
@@ -19,157 +15,99 @@ logging.basicConfig(
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# ---------- ПАРСИНГ AUTO.RU ----------
-def fetch_cars_from_auto_ru():
+# ---------- ПОЛУЧЕНИЕ ДАННЫХ С AVITO ЧЕРЕЗ RSS ----------
+def fetch_cars_from_avito():
     """
-    Парсит auto.ru с фильтрами. При неудаче логирует HTML для отладки.
+    Получает объявления с Avito через RSS-ленту.
+    Фильтры: цена 2-8 млн, год от 2019, пробег до 70 000 км, вся Россия.
+    Возвращает список словарей.
     """
-    ua = UserAgent()
-    headers = {"User-Agent": ua.random}
-
+    # RSS-лента для легковых авто по всей России с фильтрами
     url = (
-        "https://auto.ru/cars/all/"
-        "?price_from=2000000&price_to=8000000"
+        "https://www.avito.ru/rossiya/avtomobili/rss"
+        "?pmax=8000000"
+        "&pmin=2000000"
         "&year_from=2019"
-        "&distance=70"
-        "&region=0"
-        "&sort=creation_date_desc"
-        "&page=1"
+        "&distance=70000"
+        "&s=1"  # сортировка по дате
     )
 
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        html = response.text
-        # Логируем заголовки и статус
-        logging.info(f"Статус ответа: {response.status_code}")
-        logging.info(f"Content-Type: {response.headers.get('Content-Type')}")
-        # Логируем первые 2000 символов HTML
-        logging.info(f"HTML (первые 2000 символов): {html[:2000]}")
-        soup = BeautifulSoup(html, "html.parser")
+        feed = feedparser.parse(url)
+        if feed.bozo:  # ошибка парсинга
+            logging.error(f"Ошибка RSS: {feed.bozo_exception}")
+            return []
     except Exception as e:
-        logging.error(f"Ошибка при запросе к Auto.ru: {e}")
+        logging.error(f"Ошибка при запросе к Avito RSS: {e}")
         return []
 
     cars = []
-
-    # Пробуем найти карточки по разным признакам
-    listings = []
-
-    # 1. По атрибуту data-placement
-    listings = soup.find_all("div", attrs={"data-placement": "listing"})
-    if not listings:
-        # 2. По классу, содержащему "ListingItem"
-        listings = soup.find_all("div", class_=re.compile(r"ListingItem"))
-    if not listings:
-        # 3. По ссылкам с классом "Link"
-        listings = soup.find_all("a", class_=re.compile(r"Link"))
-    if not listings:
-        # 4. По элементам с ценой
-        listings = soup.find_all(string=re.compile(r"\d+[\s]?₽"))
-        # Если нашли текст, обернём его в родительский элемент
-        if listings:
-            # берём родителей
-            listings = [elem.parent for elem in listings if elem.parent]
-
-    if not listings:
-        logging.warning("Не найдено ни одного блока объявлений на странице Auto.ru")
-        # Дополнительно логируем полный HTML (если надо)
-        logging.info(f"Полный HTML (первые 3000 символов): {html[:3000]}")
-        return []
-
-    # Ограничим количество для скорости
-    for item in listings[:10]:
+    for entry in feed.entries[:10]:  # берём 10 последних
         try:
-            # Пытаемся извлечь ссылку и название
-            if item.name == "a" and item.get("href") and "/cars/" in item.get("href"):
-                link_elem = item
-                name = link_elem.get_text(strip=True)
-                link = "https://auto.ru" + link_elem.get("href")
-                parent = link_elem.find_parent("div")
-                if not parent:
-                    parent = link_elem
-            else:
-                # Ищем ссылку внутри
-                link_elem = item.find("a", href=re.compile(r"\/cars\/"))
-                if not link_elem:
-                    # пробуем найти любую ссылку
-                    link_elem = item.find("a", class_=re.compile(r"Link"))
-                if not link_elem:
-                    continue
-                name = link_elem.get_text(strip=True)
-                link = "https://auto.ru" + link_elem.get("href")
-                parent = item
+            title = entry.title
+            summary = entry.summary if hasattr(entry, 'summary') else ""
 
-            # Цена
-            price_elem = parent.find("span", class_=re.compile(r"Price"))
-            if not price_elem:
-                # ищем любой элемент с ценой
-                price_elem = parent.find(string=re.compile(r"\d+[\s]?₽"))
-            if price_elem:
-                price_text = price_elem.get_text(strip=True) if hasattr(price_elem, 'get_text') else price_elem.strip()
-                price_digits = re.sub(r"[^\d]", "", price_text)
-                price = int(price_digits) if price_digits else 0
-            else:
-                price = 0
+            # Извлекаем цену
+            price_match = re.search(r"(\d+[\s]?[₽руб])", title + " " + summary)
+            price = 0
+            if price_match:
+                price_text = re.sub(r"[^\d]", "", price_match.group(1))
+                price = int(price_text) if price_text else 0
 
             # Пробег
-            mileage_elem = parent.find(string=re.compile(r"\d+[\s]?км"))
-            if mileage_elem:
-                mileage_text = mileage_elem.strip()
-                mileage_digits = re.sub(r"[^\d]", "", mileage_text)
-                mileage = int(mileage_digits) if mileage_digits else 0
-            else:
-                mileage = 0
-
-            # Город
-            city_elem = parent.find("span", class_=re.compile(r"Geo"))
-            city = city_elem.get_text(strip=True) if city_elem else "Россия"
+            mileage_match = re.search(r"(\d+[\s]?км)", title + " " + summary)
+            mileage = 0
+            if mileage_match:
+                mileage_text = re.sub(r"[^\d]", "", mileage_match.group(1))
+                mileage = int(mileage_text) if mileage_text else 0
 
             # Год
-            year = 0
-            year_match = re.search(r"\b(20\d{2})\b", parent.get_text())
-            if year_match:
-                year = int(year_match.group(1))
+            year_match = re.search(r"\b(20\d{2})\b", title + " " + summary)
+            year = int(year_match.group(1)) if year_match else 0
 
+            # Город (из заголовка, например "в Москве")
+            city_match = re.search(r"в\s+([А-Яа-я\s\-]+)", title)
+            city = city_match.group(1) if city_match else "Россия"
+
+            # Ссылка
+            link = entry.link
+
+            # Пропускаем, если цена вне диапазона
             if price < 2000000 or price > 8000000:
                 continue
 
             cars.append({
-                "name": name,
+                "name": title,
                 "price": price,
-                "below_market": random.randint(100000, 600000),
+                "below_market": 0,  # будет пересчитано позже
                 "mileage": mileage,
-                "owners": 1,
+                "owners": 1,  # в RSS нет данных о владельцах
                 "city": city,
                 "year": year,
                 "url": link
             })
         except Exception as e:
-            logging.warning(f"Ошибка при парсинге одной карточки: {e}")
+            logging.warning(f"Ошибка парсинга записи RSS: {e}")
             continue
 
     if not cars:
-        logging.warning("Объявления найдены, но ни одно не подошло по фильтрам или не удалось распарсить.")
-        # Логируем часть HTML, где могли быть объявления
-        # Найдём div с классом, содержащим "Listing"
-        listing_blocks = soup.find_all("div", class_=re.compile(r"Listing"))
-        if listing_blocks:
-            logging.info(f"Найдены блоки Listing, первый: {listing_blocks[0].prettify()[:500]}")
-        else:
-            logging.info("Блоков Listing не найдено. HTML-фрагмент: " + html[:1500])
+        logging.warning("Не удалось получить объявления с Avito RSS")
 
-    return cars    
+    return cars
+
+# ---------- ХРАНИЛИЩЕ СОСТОЯНИЙ ----------
+user_states = {}
+
 # ---------- КОМАНДЫ ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_states[chat_id] = {"monitoring": False, "found_count": 0}
     await update.message.reply_text(
-        "🚗 ROLF AUTO FINDER (реальный парсинг)\n\n"
-        "Бот ищет авто на Auto.ru по вашим фильтрам.\n\n"
+        "🚗 ROLF AUTO FINDER (Avito RSS)\n\n"
+        "Бот ищет авто на Avito по вашим фильтрам.\n\n"
         "Команды:\n"
         "/start — перезапуск\n"
-        "/monitor — найти авто (реальный поиск)\n"
+        "/monitor — найти выгодное авто\n"
         "/stop — остановить поиск\n"
         "/stats — статистика\n"
         "/filters — мои фильтры"
@@ -177,15 +115,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔎 Текущие фильтры (Auto.ru):\n\n"
+        "🔎 Текущие фильтры (Avito):\n\n"
         "💰 Цена: 2–8 млн ₽\n"
         "📅 Год: от 2019\n"
         "🚗 Пробег: до 70 000 км\n"
-        "📍 Регион: вся Россия\n\n"
-        "Примечание: поиск по маркам пока не разделён, но все авто проходят фильтр цены и года."
+        "📍 Регион: вся Россия"
     )
 
-# ---------- НОВАЯ ФУНКЦИЯ MONITOR (С РАСЧЁТОМ СРЕДНЕЙ ЦЕНЫ) ----------
 async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
@@ -195,16 +131,19 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_states[chat_id]["monitoring"] = True
     user_states[chat_id]["found_count"] += 1
 
-    await update.message.reply_text("🔍 Анализирую рынок, ищу выгодные варианты...")
+    await update.message.reply_text("🔍 Анализирую рынок Avito, ищу выгодные варианты...")
 
-    # 1. Получаем все авто с Auto.ru
-    all_cars = fetch_cars_from_auto_ru()
+    # Получаем данные с Avito
+    all_cars = fetch_cars_from_avito()
 
     if not all_cars:
-        await update.message.reply_text("😕 Не удалось найти автомобили по вашему запросу.")
+        await update.message.reply_text(
+            "😕 Не удалось получить объявления с Avito.\n"
+            "Попробуйте позже или проверьте логи."
+        )
         return
 
-    # 2. Рассчитываем среднюю цену
+    # Рассчитываем среднюю цену
     prices = [car['price'] for car in all_cars if car['price'] > 0]
     if not prices:
         await update.message.reply_text("Не удалось рассчитать среднюю цену (нет данных).")
@@ -212,8 +151,8 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     average_price = statistics.mean(prices)
 
-    # 3. Отбираем выгодные предложения (скидка >= 15%)
-    discount_threshold = 0.15   # 15% — можно менять
+    # Отбираем выгодные предложения (скидка >= 15%)
+    discount_threshold = 0.15
     profitable_cars = []
 
     for car in all_cars:
@@ -231,11 +170,11 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 4. Показываем случайное выгодное авто
+    # Показываем случайное выгодное авто
     car = random.choice(profitable_cars)
     price_str = f"{car['price']:,}".replace(",", " ")
     avg_price_str = f"{int(average_price):,}".replace(",", " ")
-    mileage_str = f"{car['mileage']:,}".replace(",", " ")
+    mileage_str = f"{car['mileage']:,}".replace(",", " ") if car['mileage'] > 0 else "не указан"
 
     message = (
         f"🚨 *{car['name']}* — ВЫГОДНО!\n"
@@ -243,8 +182,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Средняя цена на рынке: {avg_price_str} ₽\n"
         f"📉 Ниже рынка на: {car['discount_percent']}%\n"
         f"🚗 Пробег: {mileage_str} км\n"
-        f"👤 Владельцев: {car['owners']}\n"
-        f"📅 Год: {car['year']}\n"
+        f"📅 Год: {car['year'] if car['year'] > 0 else 'не указан'}\n"
         f"📍 {car['city']}\n"
         f"🔗 [Ссылка на объявление]({car['url']})"
     )
@@ -286,7 +224,7 @@ def main():
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("stats", stats))
 
-    print("ROLF AUTO FINDER запущен (реальный парсинг Auto.ru)")
+    print("ROLF AUTO FINDER запущен (Avito RSS)")
     app.run_polling()
 
 if __name__ == "__main__":
