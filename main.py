@@ -22,12 +22,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 # ---------- ПАРСИНГ AUTO.RU ----------
 def fetch_cars_from_auto_ru():
     """
-    Парсит auto.ru с фильтрами:
-    - цена от 2 000 000 до 8 000 000 ₽
-    - год от 2019
-    - регион: вся Россия
-    - пробег до 70 000 км (общий фильтр)
-    Возвращает список словарей с данными о машинах.
+    Парсит auto.ru с фильтрами.
+    Возвращает список словарей.
     """
     ua = UserAgent()
     headers = {"User-Agent": ua.random}
@@ -43,62 +39,91 @@ def fetch_cars_from_auto_ru():
     )
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
     except Exception as e:
         logging.error(f"Ошибка при запросе к Auto.ru: {e}")
         return []
 
-    listings = soup.find_all("div", class_="ListingItem")
-    if not listings:
-        listings = soup.find_all("div", class_="ListingItem-module__listingItem")
-
     cars = []
+
+    # Пробуем разные варианты поиска карточек
+    # 1. Ищем элементы с атрибутом data-placement (часто используется)
+    listings = soup.find_all("div", attrs={"data-placement": "listing"})
+    if not listings:
+        # 2. Ищем по классу, который начинается с "ListingItem"
+        listings = soup.find_all("div", class_=re.compile(r"ListingItem"))
+    if not listings:
+        # 3. Ищем все блоки с ценой внутри ссылки
+        listings = soup.find_all("a", class_=re.compile(r"Link"))
+
+    # Если вообще ничего не нашли — логируем и выходим
+    if not listings:
+        logging.warning("Не найдено ни одного блока объявлений на странице Auto.ru")
+        return []
+
+    # Ограничим количество для скорости
     for item in listings[:10]:
         try:
-            name_elem = item.find("a", class_="ListingItemTitle")
-            name = name_elem.get_text(strip=True) if name_elem else "Неизвестно"
+            # Пытаемся извлечь название и ссылку
+            if item.name == "a" and item.get("href"):
+                link_elem = item
+                name = link_elem.get_text(strip=True)
+                link = "https://auto.ru" + link_elem.get("href")
+                # Ищем родительский контейнер для цены и пробега
+                parent = link_elem.find_parent("div")
+                if not parent:
+                    parent = link_elem
+            else:
+                # Ищем ссылку внутри
+                link_elem = item.find("a", class_=re.compile(r"Link"))
+                if not link_elem:
+                    continue
+                name = link_elem.get_text(strip=True)
+                link = "https://auto.ru" + link_elem.get("href")
+                parent = item
 
-            price_elem = item.find("span", class_="ListingItemPrice")
-            price_text = price_elem.get_text(strip=True) if price_elem else "0 ₽"
-            price_digits = re.sub(r"[^\d]", "", price_text)
-            price = int(price_digits) if price_digits else 0
+            # Цена — ищем span с классом, содержащим "Price"
+            price_elem = parent.find("span", class_=re.compile(r"Price"))
+            if not price_elem:
+                # Попробуем найти любой span с деньгами
+                price_elem = parent.find("span", string=re.compile(r"\d+[\s]?₽"))
+            if price_elem:
+                price_text = price_elem.get_text(strip=True)
+                price_digits = re.sub(r"[^\d]", "", price_text)
+                price = int(price_digits) if price_digits else 0
+            else:
+                price = 0
 
-            mileage_elem = item.find("span", class_="ListingItemTechInfo")
+            # Пробег — ищем элемент с "км"
+            mileage_elem = parent.find(string=re.compile(r"\d+[\s]?км"))
             if mileage_elem:
-                mileage_text = mileage_elem.get_text(strip=True)
+                mileage_text = mileage_elem.strip()
                 mileage_digits = re.sub(r"[^\d]", "", mileage_text)
                 mileage = int(mileage_digits) if mileage_digits else 0
             else:
                 mileage = 0
 
-            city_elem = item.find("span", class_="GeoItem")
+            # Город — ищем span с классом, содержащим "Geo"
+            city_elem = parent.find("span", class_=re.compile(r"Geo"))
             city = city_elem.get_text(strip=True) if city_elem else "Россия"
 
-            year_elem = item.find("span", class_="ListingItemTechInfo")
-            if year_elem:
-                text = year_elem.get_text(strip=True)
-                year_match = re.search(r"\b(20\d{2})\b", text)
-                year = int(year_match.group(1)) if year_match else 0
-            else:
-                year = 0
-
-            owners = 1
-            link = "https://auto.ru" + name_elem.get("href") if name_elem else "#"
+            # Год — ищем число 20xx в тексте
+            year = 0
+            year_match = re.search(r"\b(20\d{2})\b", parent.get_text())
+            if year_match:
+                year = int(year_match.group(1))
 
             if price < 2000000 or price > 8000000:
                 continue
 
-            # Временная заглушка (больше не используется, но оставлена для совместимости)
-            below_market = random.randint(100000, 600000)
-
             cars.append({
                 "name": name,
                 "price": price,
-                "below_market": below_market,
+                "below_market": random.randint(100000, 600000),  # заглушка
                 "mileage": mileage,
-                "owners": owners,
+                "owners": 1,
                 "city": city,
                 "year": year,
                 "url": link
@@ -107,8 +132,10 @@ def fetch_cars_from_auto_ru():
             logging.warning(f"Ошибка при парсинге одной карточки: {e}")
             continue
 
-    return cars
+    if not cars:
+        logging.warning("Объявления найдены, но ни одно не подошло по фильтрам или не удалось распарсить.")
 
+    return cars
 # ---------- ХРАНИЛИЩЕ СОСТОЯНИЙ ----------
 user_states = {}
 
