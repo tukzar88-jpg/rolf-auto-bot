@@ -125,7 +125,6 @@ def fetch_cars_from_drom():
             year_match = re.search(r"\b(20\d{2})\b", full)
             year = int(year_match.group(1)) if year_match else 0
 
-            # Город на Drom часто в заголовке
             city_match = re.search(r"в\s+([А-Яа-я\s\-]+)", title)
             city = city_match.group(1) if city_match else "Россия"
 
@@ -148,11 +147,9 @@ def fetch_cars_from_drom():
 
 # ---------- ОБЩАЯ ФУНКЦИЯ СБОРА ----------
 def fetch_all_cars():
-    """Собирает объявления с Avito и Drom, объединяет."""
     cars = []
     cars += fetch_cars_from_avito()
     cars += fetch_cars_from_drom()
-    # Перемешиваем, чтобы не было смещения
     random.shuffle(cars)
     return cars
 
@@ -196,23 +193,12 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Рассчитываем среднюю цену только для справки (не выводим её, но используем в логах)
     prices = [c['price'] for c in cars if c['price'] > 0]
-    if not prices:
-        await update.message.reply_text("Не удалось рассчитать среднюю цену.")
-        return
-
-    avg_price = statistics.mean(prices)
-    avg_price_str = f"{int(avg_price):,}".replace(",", " ")
+    avg_price = statistics.mean(prices) if prices else 0
+    avg_price_str = f"{int(avg_price):,}".replace(",", " ") if avg_price else "неизвестна"
 
     car = random.choice(cars)
-    deviation = (car['price'] - avg_price) / avg_price * 100
-
-    if deviation > 10:
-        price_badge = "высокая цена"
-    elif deviation < -10:
-        price_badge = "низкая цена"
-    else:
-        price_badge = "соответствует оценке"
 
     price_str = f"{car['price']:,}".replace(",", " ")
     mileage_str = f"{car['mileage']:,}".replace(",", " ") if car['mileage'] > 0 else "не указан"
@@ -220,9 +206,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = (
         f"🚗 *{car['name']}*\n"
         f"💰 Цена: {price_str} ₽\n"
-        f"📊 Средняя цена: {avg_price_str} ₽\n"
-        f"📈 Отклонение: {round(deviation, 1)}%\n"
-        f"🏷️ {price_badge}\n"
+        f"📊 Средняя цена на рынке: {avg_price_str} ₽\n"
         f"🚗 Пробег: {mileage_str} км\n"
         f"📅 Год: {car['year'] if car['year'] > 0 else 'не указан'}\n"
         f"📍 {car['city']}\n"
