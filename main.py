@@ -26,15 +26,12 @@ AVITO_URL = (
 async def check_avito():
 browser = None
 
-```
 try:
     logging.info("Запускаем Playwright...")
 
     async with async_playwright() as p:
 
-        logging.info(
-            "Запускаем Chromium через Playwright..."
-        )
+        logging.info("Запускаем Chromium через Playwright...")
 
         browser = await p.chromium.launch(
             headless=True,
@@ -46,9 +43,7 @@ try:
             ],
         )
 
-        logging.info(
-            "Chromium успешно запущен!"
-        )
+        logging.info("Chromium успешно запущен!")
 
         context = await browser.new_context(
             viewport={
@@ -67,9 +62,7 @@ try:
 
         page = await context.new_page()
 
-        logging.info(
-            "Открываем страницу Avito..."
-        )
+        logging.info("Открываем страницу Avito...")
 
         response = await page.goto(
             AVITO_URL,
@@ -77,11 +70,7 @@ try:
             timeout=30000,
         )
 
-        status = (
-            response.status
-            if response
-            else 0
-        )
+        status = response.status if response else 0
 
         logging.info(
             f"Avito HTTP status: {status}"
@@ -126,6 +115,7 @@ try:
         )
 
         if captcha_found:
+
             await browser.close()
             browser = None
 
@@ -146,6 +136,7 @@ try:
         unique_links = set()
 
         for link in car_links:
+
             try:
                 href = await link.get_attribute(
                     "href"
@@ -232,6 +223,7 @@ except Exception as e:
     )
 
     if browser:
+
         try:
             await browser.close()
         except Exception:
@@ -241,14 +233,12 @@ except Exception as e:
         "❌ <b>Ошибка Playwright</b>\n\n"
         f"<code>{str(e)[:2500]}</code>"
     )
-```
 
 async def start(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
 
-```
 await update.message.reply_text(
     "🚗 <b>ROLF AUTO FINDER</b>\n\n"
     "Бесплатный тестовый режим.\n\n"
@@ -258,14 +248,12 @@ await update.message.reply_text(
     "/stats — статистика",
     parse_mode="HTML",
 )
-```
 
 async def monitor(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
 
-```
 await update.message.reply_text(
     "🔍 Открываю Avito через браузер...\n\n"
     "Подожди несколько секунд."
@@ -278,14 +266,12 @@ await update.message.reply_text(
     parse_mode="HTML",
     disable_web_page_preview=True,
 )
-```
 
 async def filters(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
 
-```
 await update.message.reply_text(
     "🔎 <b>Текущие фильтры:</b>\n\n"
     "💰 Цена: от 1 500 000 ₽\n"
@@ -295,48 +281,41 @@ await update.message.reply_text(
     "📌 Источник: Avito",
     parse_mode="HTML",
 )
-```
 
 async def stop(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
 
-```
 await update.message.reply_text(
     "⏹ Мониторинг остановлен."
 )
-```
 
 async def stats(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
 
-```
 await update.message.reply_text(
     "📊 Статистика пока недоступна.\n\n"
     "Сейчас бот находится "
     "в диагностическом режиме."
 )
-```
 
 async def error_handler(
 update: object,
 context: ContextTypes.DEFAULT_TYPE,
 ):
 
-```
 logging.error(
     "Ошибка обработки обновления: %s",
     context.error,
 )
-```
 
 def main():
 
-```
 if not TOKEN:
+
     raise RuntimeError(
         "BOT_TOKEN не найден!"
     )
@@ -391,7 +370,6 @@ print(
 )
 
 app.run_polling()
-```
 
-if **name** == "**main**":
+if name == "main":
 main()
