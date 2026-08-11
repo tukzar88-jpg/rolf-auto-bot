@@ -20,8 +20,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 def fetch_cars_from_avito():
     """
     Получает объявления с Avito через RSS-ленту.
-    Фильтры: цена 2-8 млн, год от 2019, пробег до 70 000 км, вся Россия.
-    Возвращает список словарей.
+    Парсит вручную через регулярные выражения (устойчиво к невалидному XML).
     """
     url = (
         "https://www.avito.ru/rossiya/avtomobili/rss"
@@ -35,28 +34,31 @@ def fetch_cars_from_avito():
     try:
         response = requests.get(url, timeout=15)
         response.raise_for_status()
-        root = ET.fromstring(response.content)
+        content = response.text
     except Exception as e:
         logging.error(f"Ошибка при запросе RSS Avito: {e}")
         return []
 
-    # Ищем все элементы <item> (без привязки к пространству имён)
-    items = root.findall('.//item')
+    # Ищем все блоки <item>...</item>
+    items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
     if not items:
-        logging.warning("Не найдено элементов <item> в RSS")
+        logging.warning("Не найдено блоков <item> в RSS")
         return []
 
     cars = []
-    for item in items[:10]:  # берём 10 последних
+    for item_text in items[:10]:
         try:
-            title_elem = item.find('title')
-            title = title_elem.text if title_elem is not None else ""
+            # Извлекаем title
+            title_match = re.search(r'<title>(.*?)</title>', item_text, re.DOTALL)
+            title = title_match.group(1).strip() if title_match else ""
 
-            link_elem = item.find('link')
-            link = link_elem.text if link_elem is not None else "#"
+            # Извлекаем link
+            link_match = re.search(r'<link>(.*?)</link>', item_text, re.DOTALL)
+            link = link_match.group(1).strip() if link_match else "#"
 
-            desc_elem = item.find('description')
-            description = desc_elem.text if desc_elem is not None else ""
+            # Извлекаем description
+            desc_match = re.search(r'<description>(.*?)</description>', item_text, re.DOTALL)
+            description = desc_match.group(1).strip() if desc_match else ""
 
             full_text = title + " " + description
 
@@ -78,7 +80,7 @@ def fetch_cars_from_avito():
             year_match = re.search(r"\b(20\d{2})\b", full_text)
             year = int(year_match.group(1)) if year_match else 0
 
-            # Город (из заголовка: "в Москве" и т.п.)
+            # Город (из заголовка)
             city_match = re.search(r"в\s+([А-Яа-я\s\-]+)", title)
             city = city_match.group(1) if city_match else "Россия"
 
@@ -102,7 +104,6 @@ def fetch_cars_from_avito():
     if not cars:
         logging.warning("Не удалось получить ни одного подходящего объявления с Avito")
     return cars
-
 # ---------- ХРАНИЛИЩЕ СОСТОЯНИЙ ----------
 user_states = {}
 
