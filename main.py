@@ -3,7 +3,8 @@ import logging
 import random
 import re
 import statistics
-import feedparser
+import requests
+import xml.etree.ElementTree as ET
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -15,84 +16,91 @@ logging.basicConfig(
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# ---------- ПОЛУЧЕНИЕ ДАННЫХ С AVITO ЧЕРЕЗ RSS ----------
+# ---------- ПОЛУЧЕНИЕ ДАННЫХ С AVITO ЧЕРЕЗ RSS (БЕЗ FEEDPARSER) ----------
 def fetch_cars_from_avito():
     """
     Получает объявления с Avito через RSS-ленту.
     Фильтры: цена 2-8 млн, год от 2019, пробег до 70 000 км, вся Россия.
     Возвращает список словарей.
     """
-    # RSS-лента для легковых авто по всей России с фильтрами
     url = (
         "https://www.avito.ru/rossiya/avtomobili/rss"
         "?pmax=8000000"
         "&pmin=2000000"
         "&year_from=2019"
         "&distance=70000"
-        "&s=1"  # сортировка по дате
+        "&s=1"
     )
 
     try:
-        feed = feedparser.parse(url)
-        if feed.bozo:  # ошибка парсинга
-            logging.error(f"Ошибка RSS: {feed.bozo_exception}")
-            return []
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
     except Exception as e:
-        logging.error(f"Ошибка при запросе к Avito RSS: {e}")
+        logging.error(f"Ошибка при запросе RSS Avito: {e}")
+        return []
+
+    # Ищем все элементы <item> (без привязки к пространству имён)
+    items = root.findall('.//item')
+    if not items:
+        logging.warning("Не найдено элементов <item> в RSS")
         return []
 
     cars = []
-    for entry in feed.entries[:10]:  # берём 10 последних
+    for item in items[:10]:  # берём 10 последних
         try:
-            title = entry.title
-            summary = entry.summary if hasattr(entry, 'summary') else ""
+            title_elem = item.find('title')
+            title = title_elem.text if title_elem is not None else ""
 
-            # Извлекаем цену
-            price_match = re.search(r"(\d+[\s]?[₽руб])", title + " " + summary)
+            link_elem = item.find('link')
+            link = link_elem.text if link_elem is not None else "#"
+
+            desc_elem = item.find('description')
+            description = desc_elem.text if desc_elem is not None else ""
+
+            full_text = title + " " + description
+
+            # Цена
+            price_match = re.search(r"(\d+[\s]?[₽руб])", full_text)
             price = 0
             if price_match:
                 price_text = re.sub(r"[^\d]", "", price_match.group(1))
                 price = int(price_text) if price_text else 0
 
             # Пробег
-            mileage_match = re.search(r"(\d+[\s]?км)", title + " " + summary)
+            mileage_match = re.search(r"(\d+[\s]?км)", full_text)
             mileage = 0
             if mileage_match:
                 mileage_text = re.sub(r"[^\d]", "", mileage_match.group(1))
                 mileage = int(mileage_text) if mileage_text else 0
 
             # Год
-            year_match = re.search(r"\b(20\d{2})\b", title + " " + summary)
+            year_match = re.search(r"\b(20\d{2})\b", full_text)
             year = int(year_match.group(1)) if year_match else 0
 
-            # Город (из заголовка, например "в Москве")
+            # Город (из заголовка: "в Москве" и т.п.)
             city_match = re.search(r"в\s+([А-Яа-я\s\-]+)", title)
             city = city_match.group(1) if city_match else "Россия"
 
-            # Ссылка
-            link = entry.link
-
-            # Пропускаем, если цена вне диапазона
             if price < 2000000 or price > 8000000:
                 continue
 
             cars.append({
                 "name": title,
                 "price": price,
-                "below_market": 0,  # будет пересчитано позже
+                "below_market": 0,
                 "mileage": mileage,
-                "owners": 1,  # в RSS нет данных о владельцах
+                "owners": 1,
                 "city": city,
                 "year": year,
                 "url": link
             })
         except Exception as e:
-            logging.warning(f"Ошибка парсинга записи RSS: {e}")
+            logging.warning(f"Ошибка парсинга одного объявления: {e}")
             continue
 
     if not cars:
-        logging.warning("Не удалось получить объявления с Avito RSS")
-
+        logging.warning("Не удалось получить ни одного подходящего объявления с Avito")
     return cars
 
 # ---------- ХРАНИЛИЩЕ СОСТОЯНИЙ ----------
@@ -133,7 +141,6 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔍 Анализирую рынок Avito, ищу выгодные варианты...")
 
-    # Получаем данные с Avito
     all_cars = fetch_cars_from_avito()
 
     if not all_cars:
@@ -143,7 +150,6 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Рассчитываем среднюю цену
     prices = [car['price'] for car in all_cars if car['price'] > 0]
     if not prices:
         await update.message.reply_text("Не удалось рассчитать среднюю цену (нет данных).")
@@ -151,7 +157,6 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     average_price = statistics.mean(prices)
 
-    # Отбираем выгодные предложения (скидка >= 15%)
     discount_threshold = 0.15
     profitable_cars = []
 
@@ -170,7 +175,6 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Показываем случайное выгодное авто
     car = random.choice(profitable_cars)
     price_str = f"{car['price']:,}".replace(",", " ")
     avg_price_str = f"{int(average_price):,}".replace(",", " ")
