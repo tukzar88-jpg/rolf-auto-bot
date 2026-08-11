@@ -3,7 +3,7 @@ import logging
 import random
 import time
 import re
-import statistics          # <-- новая строка
+import statistics          # <-- НОВЫЙ ИМПОРТ
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -19,63 +19,97 @@ logging.basicConfig(
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# ---------- МОК-ДАННЫЕ (имитация найденных авто) ----------
-# Позже заменим на реальный парсинг / API
-MOCK_CARS = [
-    {
-        "name": "BMW X5 xDrive30d M Sport",
-        "price": 5250000,
-        "below_market": 480000,
-        "mileage": 41000,
-        "owners": 1,
-        "city": "Москва",
-        "year": 2021,
-        "url": "https://auto.ru/mock/1"
-    },
-    {
-        "name": "Kia Telluride Premium",
-        "price": 4500000,
-        "below_market": 320000,
-        "mileage": 58000,
-        "owners": 1,
-        "city": "Санкт-Петербург",
-        "year": 2020,
-        "url": "https://auto.ru/mock/2"
-    },
-    {
-        "name": "Chery Tiggo 8 Pro Max",
-        "price": 3200000,
-        "below_market": 150000,
-        "mileage": 18000,
-        "owners": 2,
-        "city": "Казань",
-        "year": 2022,
-        "url": "https://auto.ru/mock/3"
-    },
-    {
-        "name": "Mercedes-Benz GLE 400 d",
-        "price": 7800000,
-        "below_market": 650000,
-        "mileage": 32000,
-        "owners": 1,
-        "city": "Москва",
-        "year": 2022,
-        "url": "https://auto.ru/mock/4"
-    },
-    {
-        "name": "Hyundai Santa Fe High-Tech",
-        "price": 3800000,
-        "below_market": 210000,
-        "mileage": 65000,
-        "owners": 2,
-        "city": "Новосибирск",
-        "year": 2021,
-        "url": "https://auto.ru/mock/5"
-    }
-]
+# ---------- ПАРСИНГ AUTO.RU ----------
+def fetch_cars_from_auto_ru():
+    """
+    Парсит auto.ru с фильтрами:
+    - цена от 2 000 000 до 8 000 000 ₽
+    - год от 2019
+    - регион: вся Россия
+    - пробег до 70 000 км (общий фильтр)
+    Возвращает список словарей с данными о машинах.
+    """
+    ua = UserAgent()
+    headers = {"User-Agent": ua.random}
 
-# ---------- ХРАНИЛИЩЕ СОСТОЯНИЙ (в памяти) ----------
-# Ключ: chat_id, значение: {"monitoring": bool, "found_count": int}
+    url = (
+        "https://auto.ru/cars/all/"
+        "?price_from=2000000&price_to=8000000"
+        "&year_from=2019"
+        "&distance=70"
+        "&region=0"
+        "&sort=creation_date_desc"
+        "&page=1"
+    )
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+    except Exception as e:
+        logging.error(f"Ошибка при запросе к Auto.ru: {e}")
+        return []
+
+    listings = soup.find_all("div", class_="ListingItem")
+    if not listings:
+        listings = soup.find_all("div", class_="ListingItem-module__listingItem")
+
+    cars = []
+    for item in listings[:10]:
+        try:
+            name_elem = item.find("a", class_="ListingItemTitle")
+            name = name_elem.get_text(strip=True) if name_elem else "Неизвестно"
+
+            price_elem = item.find("span", class_="ListingItemPrice")
+            price_text = price_elem.get_text(strip=True) if price_elem else "0 ₽"
+            price_digits = re.sub(r"[^\d]", "", price_text)
+            price = int(price_digits) if price_digits else 0
+
+            mileage_elem = item.find("span", class_="ListingItemTechInfo")
+            if mileage_elem:
+                mileage_text = mileage_elem.get_text(strip=True)
+                mileage_digits = re.sub(r"[^\d]", "", mileage_text)
+                mileage = int(mileage_digits) if mileage_digits else 0
+            else:
+                mileage = 0
+
+            city_elem = item.find("span", class_="GeoItem")
+            city = city_elem.get_text(strip=True) if city_elem else "Россия"
+
+            year_elem = item.find("span", class_="ListingItemTechInfo")
+            if year_elem:
+                text = year_elem.get_text(strip=True)
+                year_match = re.search(r"\b(20\d{2})\b", text)
+                year = int(year_match.group(1)) if year_match else 0
+            else:
+                year = 0
+
+            owners = 1
+            link = "https://auto.ru" + name_elem.get("href") if name_elem else "#"
+
+            if price < 2000000 or price > 8000000:
+                continue
+
+            # Временная заглушка (больше не используется, но оставлена для совместимости)
+            below_market = random.randint(100000, 600000)
+
+            cars.append({
+                "name": name,
+                "price": price,
+                "below_market": below_market,
+                "mileage": mileage,
+                "owners": owners,
+                "city": city,
+                "year": year,
+                "url": link
+            })
+        except Exception as e:
+            logging.warning(f"Ошибка при парсинге одной карточки: {e}")
+            continue
+
+    return cars
+
+# ---------- ХРАНИЛИЩЕ СОСТОЯНИЙ ----------
 user_states = {}
 
 # ---------- КОМАНДЫ ----------
@@ -83,16 +117,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_states[chat_id] = {"monitoring": False, "found_count": 0}
     await update.message.reply_text(
-        "🚗 ROLF AUTO FINDER\n\n"
-        "Бот запущен и готов к мониторингу.\n\n"
+        "🚗 ROLF AUTO FINDER (реальный парсинг)\n\n"
+        "Бот ищет авто на Auto.ru по вашим фильтрам.\n\n"
         "Команды:\n"
         "/start — перезапуск\n"
-        "/monitor — найти авто (выдаёт 1 вариант)\n"
+        "/monitor — найти авто (реальный поиск)\n"
         "/stop — остановить поиск\n"
-        "/stats — статистика за сессию\n"
+        "/stats — статистика\n"
         "/filters — мои фильтры"
     )
 
+async def filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🔎 Текущие фильтры (Auto.ru):\n\n"
+        "💰 Цена: 2–8 млн ₽\n"
+        "📅 Год: от 2019\n"
+        "🚗 Пробег: до 70 000 км\n"
+        "📍 Регион: вся Россия\n\n"
+        "Примечание: поиск по маркам пока не разделён, но все авто проходят фильтр цены и года."
+    )
+
+# ---------- НОВАЯ ФУНКЦИЯ MONITOR (С РАСЧЁТОМ СРЕДНЕЙ ЦЕНЫ) ----------
 async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
@@ -104,7 +149,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔍 Анализирую рынок, ищу выгодные варианты...")
 
-    # 1. Получаем все авто с Auto.ru (ваша существующая функция)
+    # 1. Получаем все авто с Auto.ru
     all_cars = fetch_cars_from_auto_ru()
 
     if not all_cars:
@@ -162,7 +207,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id in user_states:
         user_states[chat_id]["monitoring"] = False
-        await update.message.reply_text("⏹ Мониторинг остановлен. Найденные авто сохранены в статистике.")
+        await update.message.reply_text("⏹ Мониторинг остановлен.")
     else:
         await update.message.reply_text("Мониторинг ещё не был запущен.")
 
@@ -193,7 +238,7 @@ def main():
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("stats", stats))
 
-    print("ROLF AUTO FINDER запущен (v1.0 с мок-данными)")
+    print("ROLF AUTO FINDER запущен (реальный парсинг Auto.ru)")
     app.run_polling()
 
 if __name__ == "__main__":
