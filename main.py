@@ -4,7 +4,6 @@ import random
 import re
 import statistics
 import requests
-import xml.etree.ElementTree as ET
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -16,12 +15,8 @@ logging.basicConfig(
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# ---------- ПОЛУЧЕНИЕ ДАННЫХ С AVITO ЧЕРЕЗ RSS (БЕЗ FEEDPARSER) ----------
+# ---------- ПОЛУЧЕНИЕ ДАННЫХ С AVITO ЧЕРЕЗ RSS (РЕГУЛЯРКИ) ----------
 def fetch_cars_from_avito():
-    """
-    Получает объявления с Avito через RSS-ленту.
-    Парсит вручную через регулярные выражения (устойчиво к невалидному XML).
-    """
     url = (
         "https://www.avito.ru/rossiya/avtomobili/rss"
         "?pmax=8000000"
@@ -39,7 +34,6 @@ def fetch_cars_from_avito():
         logging.error(f"Ошибка при запросе RSS Avito: {e}")
         return []
 
-    # Ищем все блоки <item>...</item>
     items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
     if not items:
         logging.warning("Не найдено блоков <item> в RSS")
@@ -48,39 +42,32 @@ def fetch_cars_from_avito():
     cars = []
     for item_text in items[:10]:
         try:
-            # Извлекаем title
             title_match = re.search(r'<title>(.*?)</title>', item_text, re.DOTALL)
             title = title_match.group(1).strip() if title_match else ""
 
-            # Извлекаем link
             link_match = re.search(r'<link>(.*?)</link>', item_text, re.DOTALL)
             link = link_match.group(1).strip() if link_match else "#"
 
-            # Извлекаем description
             desc_match = re.search(r'<description>(.*?)</description>', item_text, re.DOTALL)
             description = desc_match.group(1).strip() if desc_match else ""
 
             full_text = title + " " + description
 
-            # Цена
             price_match = re.search(r"(\d+[\s]?[₽руб])", full_text)
             price = 0
             if price_match:
                 price_text = re.sub(r"[^\d]", "", price_match.group(1))
                 price = int(price_text) if price_text else 0
 
-            # Пробег
             mileage_match = re.search(r"(\d+[\s]?км)", full_text)
             mileage = 0
             if mileage_match:
                 mileage_text = re.sub(r"[^\d]", "", mileage_match.group(1))
                 mileage = int(mileage_text) if mileage_text else 0
 
-            # Год
             year_match = re.search(r"\b(20\d{2})\b", full_text)
             year = int(year_match.group(1)) if year_match else 0
 
-            # Город (из заголовка)
             city_match = re.search(r"в\s+([А-Яа-я\s\-]+)", title)
             city = city_match.group(1) if city_match else "Россия"
 
@@ -104,6 +91,7 @@ def fetch_cars_from_avito():
     if not cars:
         logging.warning("Не удалось получить ни одного подходящего объявления с Avito")
     return cars
+
 # ---------- ХРАНИЛИЩЕ СОСТОЯНИЙ ----------
 user_states = {}
 
@@ -116,7 +104,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Бот ищет авто на Avito по вашим фильтрам.\n\n"
         "Команды:\n"
         "/start — перезапуск\n"
-        "/monitor — найти выгодное авто\n"
+        "/monitor — найти авто (случайное из свежих)\n"
         "/stop — остановить поиск\n"
         "/stats — статистика\n"
         "/filters — мои фильтры"
@@ -140,7 +128,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_states[chat_id]["monitoring"] = True
     user_states[chat_id]["found_count"] += 1
 
-    await update.message.reply_text("🔍 Анализирую рынок Avito, ищу выгодные варианты...")
+    await update.message.reply_text("🔍 Анализирую рынок Avito, ищу варианты...")
 
     all_cars = fetch_cars_from_avito()
 
@@ -157,35 +145,29 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     average_price = statistics.mean(prices)
-
-    discount_threshold = 0.15
-    profitable_cars = []
-
-    for car in all_cars:
-        if car['price'] <= 0:
-            continue
-        discount = 1 - (car['price'] / average_price)
-        if discount >= discount_threshold:
-            car['discount_percent'] = round(discount * 100, 1)
-            profitable_cars.append(car)
-
-    if not profitable_cars:
-        await update.message.reply_text(
-            f"😕 Авто со скидкой от {discount_threshold*100:.0f}% не найдено.\n"
-            f"Средняя цена: {int(average_price):,} ₽"
-        )
-        return
-
-    car = random.choice(profitable_cars)
-    price_str = f"{car['price']:,}".replace(",", " ")
     avg_price_str = f"{int(average_price):,}".replace(",", " ")
+
+    car = random.choice(all_cars)
+
+    deviation = (car['price'] - average_price) / average_price * 100
+    deviation_rounded = round(deviation, 1)
+
+    if abs(deviation) <= 10:
+        badge = "✅ Соответствует оценке"
+    elif deviation < -10:
+        badge = "📉 Выгодное предложение (ниже рынка)"
+    else:
+        badge = "📈 Выше средней цены"
+
+    price_str = f"{car['price']:,}".replace(",", " ")
     mileage_str = f"{car['mileage']:,}".replace(",", " ") if car['mileage'] > 0 else "не указан"
 
     message = (
-        f"🚨 *{car['name']}* — ВЫГОДНО!\n"
+        f"🚗 *{car['name']}*\n"
         f"💰 Цена: {price_str} ₽\n"
         f"📊 Средняя цена на рынке: {avg_price_str} ₽\n"
-        f"📉 Ниже рынка на: {car['discount_percent']}%\n"
+        f"📊 Отклонение: {deviation_rounded}%\n"
+        f"🏷️ {badge}\n"
         f"🚗 Пробег: {mileage_str} км\n"
         f"📅 Год: {car['year'] if car['year'] > 0 else 'не указан'}\n"
         f"📍 {car['city']}\n"
