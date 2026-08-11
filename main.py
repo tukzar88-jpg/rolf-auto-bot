@@ -7,7 +7,6 @@ import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Настройка логов
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -15,28 +14,23 @@ logging.basicConfig(
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# ---------- ПОЛУЧЕНИЕ ДАННЫХ С AVITO ЧЕРЕЗ RSS (РЕГУЛЯРКИ) ----------
+# ---------- ПОЛУЧЕНИЕ ДАННЫХ С AVITO ----------
 def fetch_cars_from_avito():
     url = (
         "https://www.avito.ru/rossiya/avtomobili/rss"
-        "?pmax=8000000"
-        "&pmin=2000000"
-        "&year_from=2019"
-        "&distance=70000"
-        "&s=1"
+        "?pmax=8000000&pmin=2000000&year_from=2019&distance=70000&s=1"
     )
-
     try:
         response = requests.get(url, timeout=15)
         response.raise_for_status()
         content = response.text
     except Exception as e:
-        logging.error(f"Ошибка при запросе RSS Avito: {e}")
+        logging.error(f"Ошибка RSS: {e}")
         return []
 
     items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
     if not items:
-        logging.warning("Не найдено блоков <item> в RSS")
+        logging.warning("Нет <item> в RSS")
         return []
 
     cars = []
@@ -44,28 +38,25 @@ def fetch_cars_from_avito():
         try:
             title_match = re.search(r'<title>(.*?)</title>', item_text, re.DOTALL)
             title = title_match.group(1).strip() if title_match else ""
-
             link_match = re.search(r'<link>(.*?)</link>', item_text, re.DOTALL)
             link = link_match.group(1).strip() if link_match else "#"
-
             desc_match = re.search(r'<description>(.*?)</description>', item_text, re.DOTALL)
             description = desc_match.group(1).strip() if desc_match else ""
+            full = title + " " + description
 
-            full_text = title + " " + description
-
-            price_match = re.search(r"(\d+[\s]?[₽руб])", full_text)
+            price_match = re.search(r"(\d+[\s]?[₽руб])", full)
             price = 0
             if price_match:
                 price_text = re.sub(r"[^\d]", "", price_match.group(1))
                 price = int(price_text) if price_text else 0
 
-            mileage_match = re.search(r"(\d+[\s]?км)", full_text)
+            mileage_match = re.search(r"(\d+[\s]?км)", full)
             mileage = 0
             if mileage_match:
                 mileage_text = re.sub(r"[^\d]", "", mileage_match.group(1))
                 mileage = int(mileage_text) if mileage_text else 0
 
-            year_match = re.search(r"\b(20\d{2})\b", full_text)
+            year_match = re.search(r"\b(20\d{2})\b", full)
             year = int(year_match.group(1)) if year_match else 0
 
             city_match = re.search(r"в\s+([А-Яа-я\s\-]+)", title)
@@ -77,22 +68,17 @@ def fetch_cars_from_avito():
             cars.append({
                 "name": title,
                 "price": price,
-                "below_market": 0,
                 "mileage": mileage,
-                "owners": 1,
                 "city": city,
                 "year": year,
                 "url": link
             })
         except Exception as e:
-            logging.warning(f"Ошибка парсинга одного объявления: {e}")
+            logging.warning(f"Ошибка парсинга: {e}")
             continue
-
-    if not cars:
-        logging.warning("Не удалось получить ни одного подходящего объявления с Avito")
     return cars
 
-# ---------- ХРАНИЛИЩЕ СОСТОЯНИЙ ----------
+# ---------- СОСТОЯНИЯ ----------
 user_states = {}
 
 # ---------- КОМАНДЫ ----------
@@ -101,63 +87,54 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_states[chat_id] = {"monitoring": False, "found_count": 0}
     await update.message.reply_text(
         "🚗 ROLF AUTO FINDER (Avito RSS)\n\n"
-        "Бот ищет авто на Avito по вашим фильтрам.\n\n"
         "Команды:\n"
         "/start — перезапуск\n"
-        "/monitor — найти авто (случайное из свежих)\n"
-        "/stop — остановить поиск\n"
+        "/monitor — показать случайное авто\n"
+        "/stop — остановить мониторинг\n"
         "/stats — статистика\n"
         "/filters — мои фильтры"
     )
 
 async def filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔎 Текущие фильтры (Avito):\n\n"
-        "💰 Цена: 2–8 млн ₽\n"
-        "📅 Год: от 2019\n"
-        "🚗 Пробег: до 70 000 км\n"
-        "📍 Регион: вся Россия"
+        "🔎 Фильтры:\n💰 2–8 млн ₽\n📅 от 2019 г.\n🚗 пробег до 70 000 км\n📍 вся Россия"
     )
 
 async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-
     if chat_id not in user_states:
         user_states[chat_id] = {"monitoring": False, "found_count": 0}
-
     user_states[chat_id]["monitoring"] = True
     user_states[chat_id]["found_count"] += 1
 
-    await update.message.reply_text("🔍 Анализирую рынок Avito, ищу варианты...")
+    await update.message.reply_text("🔍 Анализирую рынок Avito...")
 
-    all_cars = fetch_cars_from_avito()
-
-    if not all_cars:
+    cars = fetch_cars_from_avito()
+    if not cars:
         await update.message.reply_text(
-            "😕 Не удалось получить объявления с Avito.\n"
-            "Попробуйте позже или проверьте логи."
+            "😕 Нет свежих объявлений по вашим фильтрам.\nПопробуйте позже."
         )
         return
 
-    prices = [car['price'] for car in all_cars if car['price'] > 0]
+    prices = [c['price'] for c in cars if c['price'] > 0]
     if not prices:
-        await update.message.reply_text("Не удалось рассчитать среднюю цену (нет данных).")
+        await update.message.reply_text("Не удалось рассчитать среднюю цену.")
         return
 
-    average_price = statistics.mean(prices)
-    avg_price_str = f"{int(average_price):,}".replace(",", " ")
+    avg_price = statistics.mean(prices)
+    avg_price_str = f"{int(avg_price):,}".replace(",", " ")
 
-    car = random.choice(all_cars)
+    # Выбираем случайное авто
+    car = random.choice(cars)
+    deviation = (car['price'] - avg_price) / avg_price * 100
 
-    deviation = (car['price'] - average_price) / average_price * 100
-    deviation_rounded = round(deviation, 1)
-
-    if abs(deviation) <= 10:
-        badge = "✅ Соответствует оценке"
+    # Определяем текстовую оценку
+    if deviation > 10:
+        price_badge = "высокая цена"
     elif deviation < -10:
-        badge = "📉 Выгодное предложение (ниже рынка)"
+        price_badge = "низкая цена"
     else:
-        badge = "📈 Выше средней цены"
+        price_badge = "соответствует оценке"
 
     price_str = f"{car['price']:,}".replace(",", " ")
     mileage_str = f"{car['mileage']:,}".replace(",", " ") if car['mileage'] > 0 else "не указан"
@@ -165,15 +142,14 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = (
         f"🚗 *{car['name']}*\n"
         f"💰 Цена: {price_str} ₽\n"
-        f"📊 Средняя цена на рынке: {avg_price_str} ₽\n"
-        f"📊 Отклонение: {deviation_rounded}%\n"
-        f"🏷️ {badge}\n"
+        f"📊 Средняя цена: {avg_price_str} ₽\n"
+        f"📈 Отклонение: {round(deviation, 1)}%\n"
+        f"🏷️ {price_badge}\n"
         f"🚗 Пробег: {mileage_str} км\n"
         f"📅 Год: {car['year'] if car['year'] > 0 else 'не указан'}\n"
         f"📍 {car['city']}\n"
-        f"🔗 [Ссылка на объявление]({car['url']})"
+        f"🔗 [Ссылка]({car['url']})"
     )
-
     await update.message.reply_text(message, parse_mode="Markdown")
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -182,36 +158,27 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states[chat_id]["monitoring"] = False
         await update.message.reply_text("⏹ Мониторинг остановлен.")
     else:
-        await update.message.reply_text("Мониторинг ещё не был запущен.")
+        await update.message.reply_text("Мониторинг не был запущен.")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id not in user_states:
         user_states[chat_id] = {"monitoring": False, "found_count": 0}
-
     count = user_states[chat_id]["found_count"]
     status = "включён" if user_states[chat_id]["monitoring"] else "выключен"
-
-    await update.message.reply_text(
-        f"📊 Статистика за сессию:\n\n"
-        f"🔍 Найдено авто: {count}\n"
-        f"⚙️ Мониторинг: {status}"
-    )
+    await update.message.reply_text(f"📊 Найдено авто: {count}\n⚙️ Мониторинг: {status}")
 
 # ---------- ЗАПУСК ----------
 def main():
     if not TOKEN:
-        raise RuntimeError("Не задана переменная BOT_TOKEN")
-
+        raise RuntimeError("Нет BOT_TOKEN")
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("filters", filters))
     app.add_handler(CommandHandler("monitor", monitor))
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("stats", stats))
-
-    print("ROLF AUTO FINDER запущен (Avito RSS)")
+    print("Бот запущен (Avito RSS)")
     app.run_polling()
 
 if __name__ == "__main__":
