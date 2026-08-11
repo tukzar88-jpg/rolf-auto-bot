@@ -1,20 +1,12 @@
 [phases.setup]
 aptPkgs = [
-    "chromium",
-    "chromium-driver",
-    "libnss3",
-    "libatk-bridge2.0-0",
-    "libgtk-3-0",
-    "libgbm1",
-    "libasound2t64",
-    "libxshmfence1",
-    "fonts-liberation"
+  "chromium",
+  "chromium-driver"
 ]
 
 [phases.install]
 cmds = [
-    "pip install -r requirements.txt",
-    "python -m playwright install chromium"
+  "pip install -r requirements.txt"
 ]
 
 [start]
