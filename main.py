@@ -3,7 +3,10 @@ import logging
 import random
 import re
 import statistics
+import time
 import requests
+from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -13,77 +16,107 @@ logging.basicConfig(
 )
 
 TOKEN = os.getenv("BOT_TOKEN")
+ua = UserAgent()
 
-# ---------- ПОЛУЧЕНИЕ ДАННЫХ С AVITO ----------
-def fetch_cars_from_avito():
-    # Новые фильтры: цена от 1.5 млн, год от 2018
-    url = (
-        "https://www.avito.ru/rossiya/avtomobili/rss"
-        "?pmin=1500000&year_from=2018&distance=70000"
-    )
-    try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        content = response.text
-    except Exception as e:
-        logging.error(f"Ошибка RSS Avito: {e}")
-        return []
-
-    items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
-    if not items:
-        logging.warning("Avito: нет <item>")
-        return []
+# ---------- ПАРСИНГ СТРАНИЦЫ ПОИСКА AVITO ----------
+def fetch_cars_from_avito_search():
+    """
+    Парсит страницу поиска Avito с фильтрами:
+    - цена от 1.5 млн ₽
+    - год от 2017
+    - пробег не ограничен
+    - вся Россия
+    Возвращает список словарей с данными объявлений.
+    """
+    base_url = "https://www.avito.ru/rossiya/avtomobili"
+    params = {
+        "pmin": 1500000,
+        "year_from": 2017,
+        "s": 104  # параметр сортировки (по дате, можно убрать)
+    }
+    headers = {"User-Agent": ua.random}
 
     cars = []
-    for item_text in items[:50]:
+    # Парсим первые 3 страницы (чтобы собрать больше объявлений)
+    for page in range(1, 4):
+        params["p"] = page
         try:
-            title_match = re.search(r'<title>(.*?)</title>', item_text, re.DOTALL)
-            title = title_match.group(1).strip() if title_match else ""
-            link_match = re.search(r'<link>(.*?)</link>', item_text, re.DOTALL)
-            link = link_match.group(1).strip() if link_match else "#"
-            desc_match = re.search(r'<description>(.*?)</description>', item_text, re.DOTALL)
-            description = desc_match.group(1).strip() if desc_match else ""
-            full = title + " " + description
+            response = requests.get(base_url, params=params, headers=headers, timeout=15)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+        except Exception as e:
+            logging.error(f"Ошибка при запросе страницы {page}: {e}")
+            break
 
-            price_match = re.search(r"(\d+[\s]?[₽руб])", full)
-            price = 0
-            if price_match:
-                price_text = re.sub(r"[^\d]", "", price_match.group(1))
-                price = int(price_text) if price_text else 0
+        # Ищем блоки объявлений
+        items = soup.find_all("div", class_=re.compile("iva-item"))
+        if not items:
+            logging.warning(f"На странице {page} не найдено объявлений")
+            break
 
-            mileage_match = re.search(r"(\d+[\s]?км)", full)
-            mileage = 0
-            if mileage_match:
-                mileage_text = re.sub(r"[^\d]", "", mileage_match.group(1))
-                mileage = int(mileage_text) if mileage_text else 0
+        for item in items:
+            try:
+                # Название и ссылка
+                title_elem = item.find("a", class_=re.compile("title"))
+                if not title_elem:
+                    continue
+                title = title_elem.get_text(strip=True)
+                link = "https://www.avito.ru" + title_elem.get("href")
 
-            year_match = re.search(r"\b(20\d{2})\b", full)
-            year = int(year_match.group(1)) if year_match else 0
+                # Цена
+                price_elem = item.find("span", class_=re.compile("price"))
+                price_text = price_elem.get_text(strip=True) if price_elem else ""
+                price_match = re.search(r"(\d+[\s]?[₽руб])", price_text)
+                price = 0
+                if price_match:
+                    price_digits = re.sub(r"[^\d]", "", price_match.group(1))
+                    price = int(price_digits) if price_digits else 0
 
-            city_match = re.search(r"в\s+([А-Яа-я\s\-]+)", title)
-            city = city_match.group(1) if city_match else "Россия"
+                # Пробег и год обычно в строке характеристик
+                char_elem = item.find("div", class_=re.compile("params"))
+                char_text = char_elem.get_text(strip=True) if char_elem else ""
 
-            # Новый фильтр: цена от 1.5 млн, верхней границы нет
-            if price < 1500000:
+                # Год
+                year_match = re.search(r"\b(20\d{2})\b", char_text)
+                year = int(year_match.group(1)) if year_match else 0
+
+                # Пробег
+                mileage_match = re.search(r"(\d+[\s]?км)", char_text)
+                mileage = 0
+                if mileage_match:
+                    mileage_digits = re.sub(r"[^\d]", "", mileage_match.group(1))
+                    mileage = int(mileage_digits) if mileage_digits else 0
+
+                # Город (в объявлении может быть в отдельном элементе)
+                city_elem = item.find("div", class_=re.compile("geo"))
+                city = city_elem.get_text(strip=True) if city_elem else "Россия"
+
+                if price < 1500000:
+                    continue
+
+                cars.append({
+                    "name": title,
+                    "price": price,
+                    "mileage": mileage,
+                    "city": city,
+                    "year": year,
+                    "url": link,
+                    "source": "Avito"
+                })
+            except Exception as e:
+                logging.warning(f"Ошибка парсинга одного объявления: {e}")
                 continue
 
-            cars.append({
-                "name": title,
-                "price": price,
-                "mileage": mileage,
-                "city": city,
-                "year": year,
-                "url": link,
-                "source": "Avito"
-            })
-        except Exception as e:
-            logging.warning(f"Ошибка парсинга Avito: {e}")
-            continue
+        # Задержка между страницами, чтобы не нагружать сервер
+        time.sleep(random.uniform(1, 2))
+
+    # Перемешиваем, чтобы случайный выбор был разнообразным
+    random.shuffle(cars)
     return cars
 
 # ---------- ОБЩАЯ ФУНКЦИЯ СБОРА ----------
 def fetch_all_cars():
-    return fetch_cars_from_avito()
+    return fetch_cars_from_avito_search()
 
 # ---------- СОСТОЯНИЯ ----------
 user_states = {}
@@ -93,7 +126,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_states[chat_id] = {"monitoring": False, "found_count": 0}
     await update.message.reply_text(
-        "🚗 ROLF AUTO FINDER (Avito)\n\n"
+        "🚗 ROLF AUTO FINDER (Avito — парсинг поиска)\n\n"
         "Команды:\n"
         "/start — перезапуск\n"
         "/monitor — показать случайное авто\n"
@@ -104,7 +137,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔎 Фильтры:\n💰 от 1.5 млн ₽ (без верхней границы)\n📅 от 2018 г.\n🚗 пробег до 70 000 км\n📍 вся Россия\n"
+        "🔎 Фильтры (парсинг поиска):\n💰 от 1.5 млн ₽\n📅 от 2017 г.\n🚗 пробег не ограничен\n📍 вся Россия\n"
         "📌 Источник: Avito"
     )
 
@@ -115,12 +148,12 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_states[chat_id]["monitoring"] = True
     user_states[chat_id]["found_count"] += 1
 
-    await update.message.reply_text("🔍 Анализирую рынок Avito...")
+    await update.message.reply_text("🔍 Парсинг страниц Avito... Подождите немного.")
 
     cars = fetch_all_cars()
     if not cars:
         await update.message.reply_text(
-            "😕 Нет объявлений по вашим фильтрам на Avito.\n"
+            "😕 Не найдено объявлений по вашим фильтрам на Avito.\n"
             "Попробуйте изменить фильтры или повторите позже."
         )
         return
@@ -145,7 +178,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚗 Пробег: {mileage_str} км\n"
         f"📅 Год: {car['year'] if car['year'] > 0 else 'не указан'}\n"
         f"📍 {car['city']}\n"
-        f"📌 Источник: {car['source']}\n"
+        f"📌 Источник: Avito\n"
         f"🔗 [Ссылка]({car['url']})"
     )
     await update.message.reply_text(message, parse_mode="Markdown")
@@ -176,7 +209,7 @@ def main():
     app.add_handler(CommandHandler("monitor", monitor))
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("stats", stats))
-    print("Бот запущен (Avito, фильтры: цена от 1.5 млн, год от 2018)")
+    print("Бот запущен (парсинг поиска Avito, цена от 1.5 млн, год от 2017)")
     app.run_polling()
 
 if __name__ == "__main__":
