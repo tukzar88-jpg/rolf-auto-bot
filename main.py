@@ -16,7 +16,6 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 # ---------- ПОЛУЧЕНИЕ ДАННЫХ С AVITO ----------
 def fetch_cars_from_avito():
-    # Убрали &s=1 (сортировку по дате), чтобы получить больше вариантов
     url = (
         "https://www.avito.ru/rossiya/avtomobili/rss"
         "?pmax=8000000&pmin=2000000&year_from=2019&distance=70000"
@@ -26,16 +25,15 @@ def fetch_cars_from_avito():
         response.raise_for_status()
         content = response.text
     except Exception as e:
-        logging.error(f"Ошибка RSS: {e}")
+        logging.error(f"Ошибка RSS Avito: {e}")
         return []
 
     items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
     if not items:
-        logging.warning("Нет <item> в RSS")
+        logging.warning("Avito: нет <item>")
         return []
 
     cars = []
-    # Берём до 30 объявлений (больше RSS обычно не выдаёт)
     for item_text in items[:30]:
         try:
             title_match = re.search(r'<title>(.*?)</title>', item_text, re.DOTALL)
@@ -73,11 +71,89 @@ def fetch_cars_from_avito():
                 "mileage": mileage,
                 "city": city,
                 "year": year,
-                "url": link
+                "url": link,
+                "source": "Avito"
             })
         except Exception as e:
-            logging.warning(f"Ошибка парсинга: {e}")
+            logging.warning(f"Ошибка парсинга Avito: {e}")
             continue
+    return cars
+
+# ---------- ПОЛУЧЕНИЕ ДАННЫХ С DROM.RU ----------
+def fetch_cars_from_drom():
+    url = (
+        "https://www.drom.ru/region/all/rss/"
+        "?price_from=2000000&price_to=8000000"
+        "&year_from=2019&run=70000"
+    )
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        content = response.text
+    except Exception as e:
+        logging.error(f"Ошибка RSS Drom: {e}")
+        return []
+
+    items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
+    if not items:
+        logging.warning("Drom: нет <item>")
+        return []
+
+    cars = []
+    for item_text in items[:30]:
+        try:
+            title_match = re.search(r'<title>(.*?)</title>', item_text, re.DOTALL)
+            title = title_match.group(1).strip() if title_match else ""
+            link_match = re.search(r'<link>(.*?)</link>', item_text, re.DOTALL)
+            link = link_match.group(1).strip() if link_match else "#"
+            desc_match = re.search(r'<description>(.*?)</description>', item_text, re.DOTALL)
+            description = desc_match.group(1).strip() if desc_match else ""
+            full = title + " " + description
+
+            price_match = re.search(r"(\d+[\s]?[₽руб])", full)
+            price = 0
+            if price_match:
+                price_text = re.sub(r"[^\d]", "", price_match.group(1))
+                price = int(price_text) if price_text else 0
+
+            mileage_match = re.search(r"(\d+[\s]?км)", full)
+            mileage = 0
+            if mileage_match:
+                mileage_text = re.sub(r"[^\d]", "", mileage_match.group(1))
+                mileage = int(mileage_text) if mileage_text else 0
+
+            year_match = re.search(r"\b(20\d{2})\b", full)
+            year = int(year_match.group(1)) if year_match else 0
+
+            # Город на Drom часто в заголовке
+            city_match = re.search(r"в\s+([А-Яа-я\s\-]+)", title)
+            city = city_match.group(1) if city_match else "Россия"
+
+            if price < 2000000 or price > 8000000:
+                continue
+
+            cars.append({
+                "name": title,
+                "price": price,
+                "mileage": mileage,
+                "city": city,
+                "year": year,
+                "url": link,
+                "source": "Drom"
+            })
+        except Exception as e:
+            logging.warning(f"Ошибка парсинга Drom: {e}")
+            continue
+    return cars
+
+# ---------- ОБЩАЯ ФУНКЦИЯ СБОРА ----------
+def fetch_all_cars():
+    """Собирает объявления с Avito и Drom, объединяет."""
+    cars = []
+    cars += fetch_cars_from_avito()
+    cars += fetch_cars_from_drom()
+    # Перемешиваем, чтобы не было смещения
+    random.shuffle(cars)
     return cars
 
 # ---------- СОСТОЯНИЯ ----------
@@ -88,7 +164,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_states[chat_id] = {"monitoring": False, "found_count": 0}
     await update.message.reply_text(
-        "🚗 ROLF AUTO FINDER (Avito)\n\n"
+        "🚗 ROLF AUTO FINDER (Avito + Drom)\n\n"
         "Команды:\n"
         "/start — перезапуск\n"
         "/monitor — показать случайное авто\n"
@@ -99,7 +175,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🔎 Фильтры:\n💰 2–8 млн ₽\n📅 от 2019 г.\n🚗 пробег до 70 000 км\n📍 вся Россия"
+        "🔎 Фильтры:\n💰 2–8 млн ₽\n📅 от 2019 г.\n🚗 пробег до 70 000 км\n📍 вся Россия\n"
+        "📌 Источники: Avito, Drom.ru"
     )
 
 async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -109,12 +186,13 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_states[chat_id]["monitoring"] = True
     user_states[chat_id]["found_count"] += 1
 
-    await update.message.reply_text("🔍 Анализирую рынок Avito...")
+    await update.message.reply_text("🔍 Анализирую рынок Avito и Drom...")
 
-    cars = fetch_cars_from_avito()
+    cars = fetch_all_cars()
     if not cars:
         await update.message.reply_text(
-            "😕 Нет объявлений по вашим фильтрам.\nПопробуйте изменить фильтры или повторите позже."
+            "😕 Нет объявлений по вашим фильтрам на Avito и Drom.\n"
+            "Попробуйте изменить фильтры или повторите позже."
         )
         return
 
@@ -148,6 +226,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚗 Пробег: {mileage_str} км\n"
         f"📅 Год: {car['year'] if car['year'] > 0 else 'не указан'}\n"
         f"📍 {car['city']}\n"
+        f"📌 Источник: {car['source']}\n"
         f"🔗 [Ссылка]({car['url']})"
     )
     await update.message.reply_text(message, parse_mode="Markdown")
@@ -178,7 +257,7 @@ def main():
     app.add_handler(CommandHandler("monitor", monitor))
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("stats", stats))
-    print("Бот запущен (Avito RSS)")
+    print("Бот запущен (Avito + Drom)")
     app.run_polling()
 
 if __name__ == "__main__":
