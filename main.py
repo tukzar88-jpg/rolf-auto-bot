@@ -16,9 +16,10 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 # ---------- ПОЛУЧЕНИЕ ДАННЫХ С AVITO ----------
 def fetch_cars_from_avito():
+    # Убрали &s=1 (сортировку по дате), чтобы получить больше вариантов
     url = (
         "https://www.avito.ru/rossiya/avtomobili/rss"
-        "?pmax=8000000&pmin=2000000&year_from=2019&distance=70000&s=1"
+        "?pmax=8000000&pmin=2000000&year_from=2019&distance=70000"
     )
     try:
         response = requests.get(url, timeout=15)
@@ -34,7 +35,8 @@ def fetch_cars_from_avito():
         return []
 
     cars = []
-    for item_text in items[:10]:
+    # Берём до 30 объявлений (больше RSS обычно не выдаёт)
+    for item_text in items[:30]:
         try:
             title_match = re.search(r'<title>(.*?)</title>', item_text, re.DOTALL)
             title = title_match.group(1).strip() if title_match else ""
@@ -86,7 +88,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_states[chat_id] = {"monitoring": False, "found_count": 0}
     await update.message.reply_text(
-        "🚗 ROLF AUTO FINDER (Avito RSS)\n\n"
+        "🚗 ROLF AUTO FINDER (Avito)\n\n"
         "Команды:\n"
         "/start — перезапуск\n"
         "/monitor — показать случайное авто\n"
@@ -112,7 +114,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cars = fetch_cars_from_avito()
     if not cars:
         await update.message.reply_text(
-            "😕 Нет свежих объявлений по вашим фильтрам.\nПопробуйте позже."
+            "😕 Нет объявлений по вашим фильтрам.\nПопробуйте изменить фильтры или повторите позже."
         )
         return
 
@@ -124,11 +126,9 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     avg_price = statistics.mean(prices)
     avg_price_str = f"{int(avg_price):,}".replace(",", " ")
 
-    # Выбираем случайное авто
     car = random.choice(cars)
     deviation = (car['price'] - avg_price) / avg_price * 100
 
-    # Определяем текстовую оценку
     if deviation > 10:
         price_badge = "высокая цена"
     elif deviation < -10:
