@@ -1,9 +1,15 @@
 import os
 import logging
 import random
+import time
+import re
+import statistics          # <-- новая строка
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+import requests
+from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
 
 # Настройка логов
 logging.basicConfig(
@@ -87,39 +93,62 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/filters — мои фильтры"
     )
 
-async def filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔎 Текущие фильтры:\n\n"
-        "💰 Цена: 2–8 млн ₽\n"
-        "📅 Год: от 2019\n"
-        "🇨🇳 Китай: 2 000–30 000 км\n"
-        "🇰🇷 Корея: до 70 000 км\n"
-        "🇩🇪 Германия: максимальные комплектации\n"
-        "📍 Регион: вся Россия"
-    )
-
 async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
-    # Инициализация состояния, если юзер новый
     if chat_id not in user_states:
         user_states[chat_id] = {"monitoring": False, "found_count": 0}
 
     user_states[chat_id]["monitoring"] = True
     user_states[chat_id]["found_count"] += 1
 
-    # Выбираем случайное авто из мока
-    car = random.choice(MOCK_CARS)
+    await update.message.reply_text("🔍 Анализирую рынок, ищу выгодные варианты...")
 
-    # Форматируем цену с пробелами
+    # 1. Получаем все авто с Auto.ru (ваша существующая функция)
+    all_cars = fetch_cars_from_auto_ru()
+
+    if not all_cars:
+        await update.message.reply_text("😕 Не удалось найти автомобили по вашему запросу.")
+        return
+
+    # 2. Рассчитываем среднюю цену
+    prices = [car['price'] for car in all_cars if car['price'] > 0]
+    if not prices:
+        await update.message.reply_text("Не удалось рассчитать среднюю цену (нет данных).")
+        return
+
+    average_price = statistics.mean(prices)
+
+    # 3. Отбираем выгодные предложения (скидка >= 15%)
+    discount_threshold = 0.15   # 15% — можно менять
+    profitable_cars = []
+
+    for car in all_cars:
+        if car['price'] <= 0:
+            continue
+        discount = 1 - (car['price'] / average_price)
+        if discount >= discount_threshold:
+            car['discount_percent'] = round(discount * 100, 1)
+            profitable_cars.append(car)
+
+    if not profitable_cars:
+        await update.message.reply_text(
+            f"😕 Авто со скидкой от {discount_threshold*100:.0f}% не найдено.\n"
+            f"Средняя цена: {int(average_price):,} ₽"
+        )
+        return
+
+    # 4. Показываем случайное выгодное авто
+    car = random.choice(profitable_cars)
     price_str = f"{car['price']:,}".replace(",", " ")
-    below_str = f"{car['below_market']:,}".replace(",", " ")
+    avg_price_str = f"{int(average_price):,}".replace(",", " ")
     mileage_str = f"{car['mileage']:,}".replace(",", " ")
 
     message = (
-        f"🚨 *{car['name']}*\n"
+        f"🚨 *{car['name']}* — ВЫГОДНО!\n"
         f"💰 Цена: {price_str} ₽\n"
-        f"📉 Ниже рынка: {below_str} ₽\n"
+        f"📊 Средняя цена на рынке: {avg_price_str} ₽\n"
+        f"📉 Ниже рынка на: {car['discount_percent']}%\n"
         f"🚗 Пробег: {mileage_str} км\n"
         f"👤 Владельцев: {car['owners']}\n"
         f"📅 Год: {car['year']}\n"
