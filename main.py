@@ -1,5 +1,8 @@
 import os
 import logging
+import re
+import html
+import requests
 
 from telegram import Update
 from telegram.ext import (
@@ -8,321 +11,297 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from playwright.async_api import async_playwright
-
-
-# =========================
-# НАСТРОЙКА ЛОГИРОВАНИЯ
-# =========================
-
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
-
-# =========================
-# НАСТРОЙКИ
-# =========================
-
 TOKEN = os.getenv("BOT_TOKEN")
 
-AVITO_URL = (
-    "https://www.avito.ru/rossiya/avtomobili"
-    "?pmin=1500000"
-    "&distance=150000"
-)
+# =========================
+# НАСТРОЙКИ ПОИСКА
+# =========================
+
+PRICE_MIN = 1_500_000
+PRICE_MAX = 10_000_000
+MILEAGE_MAX = 150_000
+
+AVITO_HOME = "https://m.avito.ru/"
+AVITO_API = "https://m.avito.ru/api/9/items"
+
+# Автомобили
+CATEGORY_ID = 9
+
+SEARCH_RADIUS = 150
+
+# =========================
+# HTTP СЕССИЯ
+# =========================
+
+def create_session():
+    session = requests.Session()
+
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/131.0.0.0 "
+                "Mobile Safari/537.36"
+            ),
+            "Accept": (
+                "text/html,application/xhtml+xml,"
+                "application/json;q=0.9,*/*;q=0.8"
+            ),
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+    )
+
+    return session
 
 
 # =========================
-# ПРОВЕРКА AVITO
+# ПОЛУЧЕНИЕ KEY
 # =========================
 
-async def check_avito():
-    browser = None
+def extract_avito_key(text):
+    patterns = [
+        r'"key"\s*:\s*"([^"]+)"',
+        r'"key"\s*:\s*\'([^\']+)\'',
+        r'key\s*=\s*"([^"]+)"',
+        r'key\s*=\s*\'([^\']+)\'',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text)
+
+        if match:
+            return match.group(1)
+
+    return None
+
+
+# =========================
+# ПОИСК AVITO
+# =========================
+
+def search_avito():
+    session = create_session()
+
+    logging.info("Открываем мобильный Avito...")
 
     try:
-        logging.info("Запускаем Playwright...")
-
-        async with async_playwright() as p:
-
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled",
-                ],
-            )
-
-            logging.info("Chromium успешно запущен")
-
-            context = await browser.new_context(
-                viewport={
-                    "width": 1366,
-                    "height": 768,
-                },
-                locale="ru-RU",
-                timezone_id="Europe/Moscow",
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) "
-                    "AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
-            )
-
-            page = await context.new_page()
-
-            logging.info("Открываем Avito...")
-
-            response = await page.goto(
-                AVITO_URL,
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-
-            status = response.status if response else 0
-
-            logging.info(
-                f"Avito HTTP status: {status}"
-            )
-
-            # Ждём загрузку динамического контента
-            await page.wait_for_timeout(5000)
-
-            title = await page.title()
-
-            html = await page.content()
-
-            try:
-                text = await page.locator(
-                    "body"
-                ).inner_text(timeout=5000)
-            except Exception:
-                text = ""
-
-            logging.info(
-                f"Avito title: {title}"
-            )
-
-            logging.info(
-                f"Размер HTML: {len(html)}"
-            )
-
-            lower_text = text.lower()
-            lower_html = html.lower()
-
-            # =========================
-            # CAPTCHA / БЛОКИРОВКА
-            # =========================
-
-            captcha_words = [
-                "captcha",
-                "капча",
-                "проверка безопасности",
-                "подтвердите, что вы не робот",
-                "я не робот",
-                "докажите, что вы не робот",
-                "доступ ограничен",
-                "проблема с ip",
-            ]
-
-            captcha_found = any(
-                word in lower_text
-                or word in lower_html
-                for word in captcha_words
-            )
-
-            if status in (403, 429) or captcha_found:
-
-                await browser.close()
-                browser = None
-
-                return (
-                    "🛡 <b>Avito ограничил доступ</b>\n\n"
-                    f"HTTP: {status}\n"
-                    f"Заголовок: {title}\n\n"
-                    "Браузер работает, но Avito "
-                    "не отдаёт нормальную поисковую выдачу "
-                    "этому запросу.\n\n"
-                    "⏳ Бот работает. "
-                    "Нужно использовать другой способ "
-                    "получения объявлений."
-                )
-
-            # =========================
-            # ПОИСК ССЫЛОК
-            # =========================
-
-            link_locator = page.locator(
-                'a[href*="/avtomobili/"]'
-            )
-
-            try:
-                await link_locator.first.wait_for(
-                    state="attached",
-                    timeout=10000,
-                )
-            except Exception:
-
-                logging.info(
-                    "Ссылки на объявления "
-                    "за время ожидания не появились"
-                )
-
-            # Дополнительное ожидание
-            await page.wait_for_timeout(3000)
-
-            # =========================
-            # ПОЛУЧАЕМ ССЫЛКИ
-            # =========================
-
-            unique_links = set()
-
-            try:
-
-                links = await link_locator.all()
-
-                logging.info(
-                    f"Найдено элементов ссылок: "
-                    f"{len(links)}"
-                )
-
-                for link in links:
-
-                    try:
-
-                        href = await link.get_attribute(
-                            "href"
-                        )
-
-                        if not href:
-                            continue
-
-                        if "/avtomobili/" not in href:
-                            continue
-
-                        # Если ссылка относительная
-                        if href.startswith("/"):
-                            href = (
-                                "https://www.avito.ru"
-                                + href
-                            )
-
-                        # Убираем параметры
-                        href = href.split("?")[0]
-
-                        unique_links.add(href)
-
-                    except Exception:
-                        continue
-
-            except Exception as e:
-
-                logging.exception(
-                    f"Ошибка получения ссылок: {e}"
-                )
-
-            # =========================
-            # ОБЪЯВЛЕНИЯ НАЙДЕНЫ
-            # =========================
-
-            if unique_links:
-
-                first_links = list(
-                    unique_links
-                )[:10]
-
-                result_lines = []
-
-                for number, link in enumerate(
-                    first_links,
-                    start=1,
-                ):
-
-                    result_lines.append(
-                        f"{number}. {link}"
-                    )
-
-                links_text = "\n".join(
-                    result_lines
-                )
-
-                await browser.close()
-                browser = None
-
-                return (
-                    "✅ <b>Объявления найдены!</b>\n\n"
-                    "💰 Цена от: 1 500 000 ₽\n"
-                    "🚗 Пробег: до 150 000 км\n"
-                    "📍 Россия\n"
-                    "📌 Источник: Avito\n\n"
-                    f"🔎 Найдено ссылок: "
-                    f"{len(unique_links)}\n\n"
-                    "🚘 <b>Первые объявления:</b>\n\n"
-                    f"{links_text[:3500]}\n\n"
-                    "Следующим этапом добавим "
-                    "получение цены, марки, модели, "
-                    "года и пробега."
-                )
-
-            # =========================
-            # ОБЪЯВЛЕНИЯ НЕ НАЙДЕНЫ
-            # =========================
-
-            preview = " ".join(
-                text[:2000].split()
-            )
-
-            await browser.close()
-            browser = None
-
-            return (
-                "⚠️ <b>Объявления пока не найдены</b>\n\n"
-                f"HTTP: {status}\n"
-                f"Заголовок: {title}\n"
-                f"Размер HTML: {len(html)}\n\n"
-                "Поисковая выдача не вернула "
-                "подходящих ссылок Avito.\n\n"
-                "Фрагмент страницы:\n"
-                f"<code>{preview[:2000]}</code>"
-            )
-
+        home_response = session.get(
+            AVITO_HOME,
+            timeout=20,
+        )
     except Exception as e:
+        return {
+            "ok": False,
+            "status": 0,
+            "error": f"Ошибка подключения: {e}",
+        }
 
-        logging.exception(
-            "Ошибка Playwright"
+    logging.info(
+        "Avito home HTTP: %s",
+        home_response.status_code,
+    )
+
+    if home_response.status_code != 200:
+        return {
+            "ok": False,
+            "status": home_response.status_code,
+            "error": "Avito не отдал главную страницу.",
+        }
+
+    avito_key = extract_avito_key(
+        home_response.text
+    )
+
+    if not avito_key:
+        logging.warning(
+            "Ключ Avito не найден."
         )
 
-        if browser:
+    params = {
+        "categoryId": CATEGORY_ID,
+        "priceMin": PRICE_MIN,
+        "priceMax": PRICE_MAX,
+        "searchRadius": SEARCH_RADIUS,
+        "withImagesOnly": "true",
+        "display": "list",
+        "limit": 30,
+        "page": 1,
+        "sort": "date",
+    }
 
-            try:
-                await browser.close()
-            except Exception:
-                pass
+    if avito_key:
+        params["key"] = avito_key
 
-        return (
-            "❌ <b>Ошибка Playwright</b>\n\n"
-            f"<code>{str(e)[:2500]}</code>"
+    headers = {
+        "Referer": AVITO_HOME,
+        "Accept": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+    logging.info(
+        "Запрашиваем объявления Avito..."
+    )
+
+    try:
+        response = session.get(
+            AVITO_API,
+            params=params,
+            headers=headers,
+            timeout=30,
         )
+    except Exception as e:
+        return {
+            "ok": False,
+            "status": 0,
+            "error": f"Ошибка запроса: {e}",
+        }
+
+    logging.info(
+        "Avito API HTTP: %s",
+        response.status_code,
+    )
+
+    if response.status_code != 200:
+        return {
+            "ok": False,
+            "status": response.status_code,
+            "error": (
+                "Avito ограничил или отклонил "
+                "запрос."
+            ),
+        }
+
+    try:
+        data = response.json()
+    except Exception:
+        return {
+            "ok": False,
+            "status": response.status_code,
+            "error": (
+                "Avito ответил не JSON."
+            ),
+        }
+
+    if not isinstance(data, dict):
+        return {
+            "ok": False,
+            "status": response.status_code,
+            "error": "Неожиданный формат ответа Avito.",
+        }
+
+    return {
+        "ok": True,
+        "status": response.status_code,
+        "data": data,
+    }
 
 
 # =========================
-# /start
+# ИЗВЛЕЧЕНИЕ ОБЪЯВЛЕНИЙ
+# =========================
+
+def extract_items(data):
+    result = []
+
+    if not isinstance(data, dict):
+        return result
+
+    result_block = data.get("result")
+
+    if isinstance(result_block, dict):
+        items = result_block.get("items", [])
+    else:
+        items = data.get("items", [])
+
+    if not isinstance(items, list):
+        return result
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("type") not in (
+            None,
+            "item",
+        ):
+            continue
+
+        value = item.get("value", item)
+
+        if not isinstance(value, dict):
+            continue
+
+        item_id = (
+            value.get("id")
+            or value.get("itemId")
+            or item.get("id")
+        )
+
+        if not item_id:
+            continue
+
+        title = (
+            value.get("title")
+            or value.get("name")
+            or "Автомобиль"
+        )
+
+        price = (
+            value.get("price")
+            or value.get("priceDetailed")
+            or ""
+        )
+
+        url = (
+            value.get("url")
+            or value.get("uri")
+            or ""
+        )
+
+        if url and url.startswith("/"):
+            url = "https://www.avito.ru" + url
+
+        if not url:
+            url = (
+                "https://www.avito.ru/"
+                f"items/{item_id}"
+            )
+
+        result.append(
+            {
+                "id": str(item_id),
+                "title": str(title),
+                "price": str(price),
+                "url": str(url),
+            }
+        )
+
+    return result
+
+
+# =========================
+# КОМАНДА START
 # =========================
 
 async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     await update.message.reply_text(
         "🚗 <b>ROLF AUTO FINDER</b>\n\n"
-        "Бесплатный тестовый режим.\n\n"
-        "/monitor — проверить Avito\n"
-        "/filters — показать фильтры\n"
+        "Бот запущен.\n\n"
+        "/monitor — поиск автомобилей\n"
+        "/test — тест соединения с Avito\n"
+        "/filters — текущие фильтры\n"
         "/stop — остановить\n"
         "/stats — статистика",
         parse_mode="HTML",
@@ -330,87 +309,257 @@ async def start(
 
 
 # =========================
-# /monitor
+# ТЕСТ AVITO
 # =========================
 
-async def monitor(
+async def test_avito(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     await update.message.reply_text(
-        "🔍 Открываю Avito через браузер...\n\n"
+        "🧪 Проверяю бесплатный способ "
+        "получения объявлений Avito...\n\n"
         "Подожди несколько секунд."
     )
 
-    result = await check_avito()
+    result = search_avito()
+
+    if not result["ok"]:
+        error_text = html.escape(
+            str(result.get("error", "Неизвестная ошибка"))
+        )
+
+        await update.message.reply_text(
+            "❌ <b>Тест не прошёл</b>\n\n"
+            f"HTTP: {result.get('status', 0)}\n\n"
+            f"<code>{error_text[:2500]}</code>",
+            parse_mode="HTML",
+        )
+
+        return
+
+    items = extract_items(
+        result["data"]
+    )
+
+    if not items:
+        await update.message.reply_text(
+            "⚠️ <b>Avito ответил нормально, "
+            "но объявления не найдены.</b>\n\n"
+            f"HTTP: {result['status']}\n\n"
+            "Это уже полезный результат: "
+            "соединение работает, теперь нужно "
+            "доработать параметры поиска.",
+            parse_mode="HTML",
+        )
+
+        return
+
+    text = (
+        "✅ <b>Бесплатный поиск работает!</b>\n\n"
+        f"HTTP: {result['status']}\n"
+        f"Найдено: {len(items)}\n\n"
+    )
+
+    for number, item in enumerate(
+        items[:5],
+        start=1,
+    ):
+        title = html.escape(
+            item["title"]
+        )
+
+        price = html.escape(
+            item["price"]
+        )
+
+        url = html.escape(
+            item["url"]
+        )
+
+        text += (
+            f"{number}. <b>{title}</b>\n"
+            f"💰 {price}\n"
+            f"🔗 {url}\n\n"
+        )
 
     await update.message.reply_text(
-        result,
+        text[:3900],
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
 
 
 # =========================
-# /filters
+# ОСНОВНОЙ МОНИТОРИНГ
+# =========================
+
+async def monitor(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await update.message.reply_text(
+        "🔍 <b>Ищу автомобили на Avito...</b>\n\n"
+        f"💰 Цена: от {PRICE_MIN:,} ₽\n"
+        f"🚗 Пробег: до {MILEAGE_MAX:,} км\n\n"
+        "Подожди несколько секунд.".replace(",", " "),
+        parse_mode="HTML",
+    )
+
+    result = search_avito()
+
+    if not result["ok"]:
+        status = result.get(
+            "status",
+            0,
+        )
+
+        if status in (
+            403,
+            429,
+        ):
+            await update.message.reply_text(
+                "🛡 <b>Avito ограничил доступ</b>\n\n"
+                f"HTTP: {status}\n\n"
+                "Бесплатный способ сейчас "
+                "заблокирован со стороны Avito.\n\n"
+                "Telegram и Railway работают "
+                "нормально. Проблема только "
+                "в доступе к выдаче Avito.",
+                parse_mode="HTML",
+            )
+
+        else:
+            error_text = html.escape(
+                str(
+                    result.get(
+                        "error",
+                        "Неизвестная ошибка",
+                    )
+                )
+            )
+
+            await update.message.reply_text(
+                "❌ <b>Ошибка получения Avito</b>\n\n"
+                f"HTTP: {status}\n\n"
+                f"<code>{error_text[:2500]}</code>",
+                parse_mode="HTML",
+            )
+
+        return
+
+    items = extract_items(
+        result["data"]
+    )
+
+    if not items:
+        await update.message.reply_text(
+            "⚠️ <b>Объявления пока не найдены</b>\n\n"
+            "Avito ответил, но текущий формат "
+            "выдачи не содержит подходящих "
+            "объявлений.\n\n"
+            "Следующим этапом настроим "
+            "точные параметры автомобилей.",
+            parse_mode="HTML",
+        )
+
+        return
+
+    text = (
+        "🚗 <b>НАЙДЕННЫЕ АВТО</b>\n\n"
+    )
+
+    for number, item in enumerate(
+        items[:10],
+        start=1,
+    ):
+        title = html.escape(
+            item["title"]
+        )
+
+        price = html.escape(
+            item["price"]
+        )
+
+        url = html.escape(
+            item["url"]
+        )
+
+        text += (
+            f"<b>{number}. {title}</b>\n"
+            f"💰 {price}\n"
+            f"🔗 {url}\n\n"
+        )
+
+    await update.message.reply_text(
+        text[:3900],
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+# =========================
+# ФИЛЬТРЫ
 # =========================
 
 async def filters(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     await update.message.reply_text(
         "🔎 <b>Текущие фильтры:</b>\n\n"
-        "💰 Цена: от 1 500 000 ₽\n"
-        "🚗 Пробег: до 150 000 км\n"
+        f"💰 Цена: от {PRICE_MIN:,} ₽\n"
+        f"💰 Цена до: {PRICE_MAX:,} ₽\n"
+        f"🚗 Пробег: до {MILEAGE_MAX:,} км\n"
         "📅 Год: без ограничений\n"
         "📍 Россия\n"
-        "📌 Источник: Avito",
+        "📌 Источник: Avito\n\n"
+        "⚙️ Режим: бесплатный поиск",
         parse_mode="HTML",
     )
 
 
 # =========================
-# /stop
+# STOP
 # =========================
 
 async def stop(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     await update.message.reply_text(
         "⏹ Мониторинг остановлен."
     )
 
 
 # =========================
-# /stats
+# STATS
 # =========================
 
 async def stats(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     await update.message.reply_text(
-        "📊 Статистика пока недоступна.\n\n"
-        "Сейчас бот находится "
-        "в диагностическом режиме."
+        "📊 <b>Статистика</b>\n\n"
+        "Режим: тестовый\n"
+        "Источник: Avito\n"
+        "Стоимость API: 0 ₽\n\n"
+        "Автоматическая оценка выгодности "
+        "будет добавлена после успешного "
+        "получения объявлений.",
+        parse_mode="HTML",
     )
 
 
 # =========================
-# ОБРАБОТКА ОШИБОК
+# ERROR HANDLER
 # =========================
 
 async def error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-
     logging.error(
         "Ошибка обработки обновления: %s",
         context.error,
@@ -418,13 +567,11 @@ async def error_handler(
 
 
 # =========================
-# ЗАПУСК БОТА
+# MAIN
 # =========================
 
 def main():
-
     if not TOKEN:
-
         raise RuntimeError(
             "BOT_TOKEN не найден!"
         )
@@ -439,6 +586,13 @@ def main():
         CommandHandler(
             "start",
             start,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "test",
+            test_avito,
         )
     )
 
@@ -480,10 +634,6 @@ def main():
 
     app.run_polling()
 
-
-# =========================
-# MAIN
-# =========================
 
 if __name__ == "__main__":
     main()
